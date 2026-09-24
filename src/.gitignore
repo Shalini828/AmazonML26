@@ -1,0 +1,17 @@
+# Dataset - DO NOT PUSH
+student_resource/
+dataset/
+*.tsv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
