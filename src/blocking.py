@@ -1,76 +1,131 @@
-import re
-
-from normalization import normalize_dataframe, normalize_text
-
-
-def get_address_number(address):
-    if address is None:
-        return ""
-
-    address = normalize_text(address)
-    match = re.search(r"\b\d+\b", address)
-
-    if match:
-        return match.group()
-
-    return ""
+import pandas as pd
+from normalization import normalize_dataframe
 
 
 def create_blocking_key(df):
-    """Create basic blocking keys for candidate generation."""
+    """
+    Create multiple blocking keys for fast candidate generation.
+    """
+
     df = normalize_dataframe(df)
 
-    # Rule 1: Country + first character of business name
+    # Make sure normalized columns are strings
+    name = df["business_name_normalized"].fillna("").astype(str)
+    country = df["country_normalized"].fillna("").astype(str)
+
+    # Blocking key 1:
+    # Country + first character of business name
     df["blocking_key_1"] = (
-        df["country_normalized"]
-        + "_"
-        + df["business_name_normalized"].str[:1]
+        country + "_" + name.str[:1]
     )
 
-    # Rule 2: Country + first 4 characters of the longest name word
-    def get_name_prefix(name):
-        words = name.split()
-        meaningful_words = [word for word in words if len(word) >= 4]
-
-        if not meaningful_words:
-            return ""
-
-        longest_word = max(meaningful_words, key=len)
-        return longest_word[:4]
-
-    df["name_prefix"] = df["business_name_normalized"].apply(get_name_prefix)
+    # Blocking key 2:
+    # Country + first 4 characters of business name
     df["blocking_key_2"] = (
-        df["country_normalized"] + "_" + df["name_prefix"]
+        country + "_" + name.str[:4]
     )
 
-    # Rule 3: Country + street address number
-    df["address_number"] = df["business_address_normalized"].apply(
-        get_address_number
-    )
+    # Blocking key 3:
+    # Country + first 3 characters
+    # Useful when names are slightly different
     df["blocking_key_3"] = (
-        df["country_normalized"] + "_addr_" + df["address_number"]
+        country + "_" + name.str[:3]
     )
 
     return df
 
 
+def build_block_index(df):
+    """
+    Build an in-memory index:
+        blocking_key -> entity IDs
+
+    This lets us retrieve candidates without comparing
+    every Source-1 row with every Source-2/3 row.
+    """
+
+    df = create_blocking_key(df)
+
+    index = {}
+
+    for key_column in [
+        "blocking_key_1",
+        "blocking_key_2",
+        "blocking_key_3",
+    ]:
+
+        grouped = df.groupby(key_column)["entity_id"].apply(list)
+
+        for key, entity_ids in grouped.items():
+
+            if not key:
+                continue
+
+            index.setdefault(key_column, {})
+            index[key_column][key] = entity_ids
+
+    return df, index
+
+
+def get_candidates(row, index):
+    """
+    Retrieve candidate entity IDs for one Source-1 record.
+    """
+
+    candidates = set()
+
+    for key_column in [
+        "blocking_key_1",
+        "blocking_key_2",
+        "blocking_key_3",
+    ]:
+
+        key = row[key_column]
+
+        if not key:
+            continue
+
+        matches = index.get(key_column, {}).get(key, [])
+
+        candidates.update(matches)
+
+    return candidates
+
+
 if __name__ == "__main__":
-    import pandas as pd
 
     from config import TRAIN_SOURCE1
 
-    df = pd.read_csv(TRAIN_SOURCE1, sep="\t", nrows=10)
-    df = create_blocking_key(df)
+    df = pd.read_csv(
+        TRAIN_SOURCE1,
+        sep="\t",
+        nrows=1000
+    )
 
+    df, index = build_block_index(df)
+
+    print("Rows processed:", len(df))
+
+    print("\nBlocking columns:")
     print(
         df[
             [
                 "entity_id",
                 "business_name",
                 "country",
-                "business_name_normalized",
                 "blocking_key_1",
                 "blocking_key_2",
+                "blocking_key_3",
             ]
-        ].to_string(index=False)
+        ].head(10).to_string(index=False)
     )
+
+    print("\nIndex sizes:")
+
+    for key_column, values in index.items():
+        print(
+            key_column,
+            "→",
+            len(values),
+            "unique blocks"
+        )
