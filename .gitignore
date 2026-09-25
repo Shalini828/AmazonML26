@@ -15,3 +15,8 @@ venv/
 
 # OS
 .DS_Store
+
+# Generated processed data / local database
+data/processed/
+*.parquet
+*.duckdb
