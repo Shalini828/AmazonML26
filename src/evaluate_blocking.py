@@ -1,212 +1,94 @@
+# src/evaluate_blocking.py — SMOKE TEST ONLY
+import sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import pandas as pd
+from config import TRAIN_GROUND_TRUTH
+from cache_utils import load_normalized
+from blocking import get_blocking_keys, build_index
 
-from config import (
-    TRAIN_SOURCE1,
-    TRAIN_SOURCE2,
-    TRAIN_SOURCE3,
-    TRAIN_GROUND_TRUTH,
-)
-from normalization import normalize_text
-
-
-def get_blocking_keys(name, country):
-    """
-    Generate the same blocking keys used in blocking.py.
-    """
-
-    name = normalize_text(name)
-    country = normalize_text(country)
-
-    # Rule 1: country + first character
-    key1 = ""
-    if name:
-        key1 = country + "_" + name[0]
-
-    # Rule 2: country + first 4 characters
-    # of the longest meaningful word
-    words = [
-        word
-        for word in name.split()
-        if len(word) >= 4
-    ]
-
-    key2 = ""
-
-    if words:
-        longest_word = max(words, key=len)
-        key2 = country + "_" + longest_word[:4]
-
-    return {key1, key2} - {""}
+S1_SAMPLE = 500
+S2_SAMPLE_RATE = 0.02
+RANDOM_SEED = 42
 
 
 def load_ground_truth():
-    """
-    Load ground truth and create:
-        source1_id -> set of true matched source2/source3 IDs
-    """
-
-    ground_truth = pd.read_csv(
-        TRAIN_GROUND_TRUTH,
-        sep="\t"
-    )
-
+    gt = pd.read_csv(TRAIN_GROUND_TRUTH, sep="\t", dtype=str).fillna("")
     truth = {}
-
-    for _, row in ground_truth.iterrows():
-        source1_id = str(row["source1_entity_id"])
-
-        matches = str(row["matched_entity_ids"])
-
-        if matches.lower() == "nan" or not matches.strip():
-            truth[source1_id] = set()
-        else:
-            truth[source1_id] = {
-                match.strip()
-                for match in matches.split(",")
-                if match.strip()
-            }
-
+    for s1, txt in zip(gt["source1_entity_id"], gt["matched_entity_ids"]):
+        txt = txt.strip()
+        truth[s1] = {m.strip() for m in txt.split(",") if m.strip()} if txt else set()
     return truth
 
 
-def load_source_keys(path, required_ids):
-    """
-    Read a source file in chunks and calculate blocking keys
-    only for IDs that actually appear in the ground truth.
-    """
-
-    result = {}
-
-    for chunk in pd.read_csv(
-        path,
-        sep="\t",
-        chunksize=100_000,
-        usecols=[
-            "entity_id",
-            "business_name",
-            "country"
-        ]
-    ):
-        chunk["entity_id"] = chunk["entity_id"].astype(str)
-
-        relevant = chunk[
-            chunk["entity_id"].isin(required_ids)
-        ]
-
-        for _, row in relevant.iterrows():
-            result[row["entity_id"]] = get_blocking_keys(
-                row["business_name"],
-                row["country"]
-            )
-
-    return result
-
-
 def main():
-
-    print("Loading ground truth...")
-
+    t0 = time.time()
+    print("Loading GT...")
     truth = load_ground_truth()
+    print(f"  {len(truth):,}  [{time.time()-t0:.1f}s]")
 
-    print("Source 1 entities in ground truth:", len(truth))
+    t0 = time.time()
+    print("Loading normalized sources...")
+    s1 = load_normalized("s1")
+    s2 = load_normalized("s2")
+    s3 = load_normalized("s3")
+    print(f"  S1={len(s1):,} S2={len(s2):,} S3={len(s3):,}  [{time.time()-t0:.1f}s]")
 
-    # IDs that appear as true matches
-    target_ids = set()
+    t0 = time.time()
+    s2_s = s2.sample(frac=S2_SAMPLE_RATE, random_state=RANDOM_SEED)
+    s3_s = s3.sample(frac=S2_SAMPLE_RATE, random_state=RANDOM_SEED)
+    print(f"  Sampled S2={len(s2_s):,} S3={len(s3_s):,}  [{time.time()-t0:.1f}s]")
+    del s2, s3
 
-    for matches in truth.values():
-        target_ids.update(matches)
+    sampled_ids = set(s2_s["entity_id"]) | set(s3_s["entity_id"])
+    valid = [s1_id for s1_id, m in truth.items() if m and all(x in sampled_ids for x in m)]
+    print(f"  Valid S1: {len(valid):,}")
+    if S1_SAMPLE < len(valid):
+        import random
+        random.seed(RANDOM_SEED)
+        valid = random.sample(valid, S1_SAMPLE)
+    print(f"  Sampled S1 to {len(valid):,}")
 
-    print("True matched Source 2/3 IDs:", len(target_ids))
+    t0 = time.time()
+    print("Building index...")
+    raw_index = build_index(s2_s.to_dict("records") + s3_s.to_dict("records"))
+    index = {k: v for k, v in raw_index.items() if len(v) <= 200}
+    print(f"  {len(raw_index):,} raw keys → {len(index):,} after bucket filter")
+    print(f"  {len(index):,} keys  [{time.time()-t0:.1f}s]")
 
-    print("\nReading Source 1...")
-    source1_keys = load_source_keys(
-        TRAIN_SOURCE1,
-        set(truth.keys())
-    )
+    t0 = time.time()
+    print("Evaluating...")
+    valid_set = set(valid)
+    s1_eval = s1[s1["entity_id"].isin(valid_set)]
+    total = retained = 0
+    missing = []
+    cand_counts = []
+    for row in s1_eval.to_dict("records"):
+        keys = get_blocking_keys(row)
+        cand = set()
+        for key in sorted(keys, key=lambda item: 0 if "pin" in item[0] else 1):
+            cand.update(index.get(key, []))
+        if len(cand) > 20:
+            cand = set(sorted(cand)[:20])
+        cand_counts.append(len(cand))
+        for tgt in truth[row["entity_id"]]:
+            total += 1
+            if tgt in cand: retained += 1
+            else: missing.append((row["entity_id"], tgt))
+    print(f"  [{time.time()-t0:.1f}s]")
 
-    print("Source 1 records loaded:", len(source1_keys))
-
-    print("\nReading Source 2...")
-    source2_keys = load_source_keys(
-        TRAIN_SOURCE2,
-        target_ids
-    )
-
-    print("Relevant Source 2 records:", len(source2_keys))
-
-    print("\nReading Source 3...")
-    source3_keys = load_source_keys(
-        TRAIN_SOURCE3,
-        target_ids
-    )
-
-    print("Relevant Source 3 records:", len(source3_keys))
-
-    target_keys = {}
-    target_keys.update(source2_keys)
-    target_keys.update(source3_keys)
-
-    # --------------------------------------------------
-    # Evaluate blocking recall
-    # --------------------------------------------------
-
-    total_true_matches = 0
-    retained_true_matches = 0
-    missing_matches = []
-
-    for source1_id, true_matches in truth.items():
-
-        if source1_id not in source1_keys:
-            continue
-
-        source1_blocking_keys = source1_keys[source1_id]
-
-        for target_id in true_matches:
-
-            total_true_matches += 1
-
-            if target_id not in target_keys:
-                missing_matches.append(
-                    (source1_id, target_id, "target_not_found")
-                )
-                continue
-
-            target_blocking_keys = target_keys[target_id]
-
-            # Candidate survives if ANY blocking rule matches
-            if source1_blocking_keys & target_blocking_keys:
-                retained_true_matches += 1
-            else:
-                missing_matches.append(
-                    (source1_id, target_id, "blocked_out")
-                )
-
-    if total_true_matches == 0:
-        print("\nNo true matches found.")
-        return
-
-    recall = (
-        retained_true_matches
-        / total_true_matches
-        * 100
-    )
-
-    print("\n" + "=" * 50)
-    print("BLOCKING EVALUATION")
-    print("=" * 50)
-
-    print(f"Total true matches:       {total_true_matches:,}")
-    print(f"Retained by blocking:     {retained_true_matches:,}")
-    print(f"Lost during blocking:     {len(missing_matches):,}")
-    print(f"Blocking recall:          {recall:.2f}%")
-
-    print("=" * 50)
-
-    if missing_matches:
-        print("\nFirst 10 missed matches:")
-
-        for item in missing_matches[:10]:
-            print(item)
+    print("\n" + "=" * 55)
+    print("SMOKE TEST")
+    print("=" * 55)
+    print(f"S1 evaluated:       {len(s1_eval):,}")
+    print(f"Total true matches: {total:,}")
+    print(f"Retained:           {retained:,}")
+    recall = retained/total*100 if total else 0
+    print(f"BLOCKING RECALL:    {recall:.2f}%")
+    if cand_counts:
+        print(f"Avg candidates / S1: {sum(cand_counts)/len(cand_counts):.1f}")
+    print("=" * 55)
 
 
 if __name__ == "__main__":
