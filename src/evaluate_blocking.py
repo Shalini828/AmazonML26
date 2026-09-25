@@ -1,94 +1,410 @@
-# src/evaluate_blocking.py — SMOKE TEST ONLY
-import sys, time
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+import polars as pl
 
-import pandas as pd
-from config import TRAIN_GROUND_TRUTH
-from cache_utils import load_normalized
-from blocking import get_blocking_keys, build_index
-
-S1_SAMPLE = 500
-S2_SAMPLE_RATE = 0.02
-RANDOM_SEED = 42
+from config import (
+    TRAIN_SOURCE1,
+    TRAIN_SOURCE2,
+    TRAIN_SOURCE3,
+    TRAIN_GROUND_TRUTH,
+)
+from normalization import normalize_text
 
 
-def load_ground_truth():
-    gt = pd.read_csv(TRAIN_GROUND_TRUTH, sep="\t", dtype=str).fillna("")
-    truth = {}
-    for s1, txt in zip(gt["source1_entity_id"], gt["matched_entity_ids"]):
-        txt = txt.strip()
-        truth[s1] = {m.strip() for m in txt.split(",") if m.strip()} if txt else set()
-    return truth
+# --------------------------------------------------
+# Normalization + blocking keys
+# --------------------------------------------------
 
+def add_blocking_keys(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Create the same blocking keys used by blocking.py.
+
+    key1 = country + first character
+    key2 = country + first 4 characters
+    key3 = country + first 3 characters
+    """
+
+    df = df.with_columns(
+        [
+            pl.col("business_name")
+            .map_elements(
+                normalize_text,
+                return_dtype=pl.String,
+            )
+            .fill_null(pl.lit(""))
+            .alias("name_normalized"),
+
+            pl.col("country")
+            .map_elements(
+                normalize_text,
+                return_dtype=pl.String,
+            )
+            .fill_null(pl.lit(""))
+            .alias("country_normalized"),
+        ]
+    )
+
+    df = df.with_columns(
+        [
+            (
+                pl.col("country_normalized")
+                + pl.lit("_")
+                + pl.col("name_normalized").str.slice(0, 1)
+            ).alias("key1"),
+
+            (
+                pl.col("country_normalized")
+                + pl.lit("_")
+                + pl.col("name_normalized").str.slice(0, 4)
+            ).alias("key2"),
+
+            (
+                pl.col("country_normalized")
+                + pl.lit("_")
+                + pl.col("name_normalized").str.slice(0, 3)
+            ).alias("key3"),
+        ]
+    )
+
+    return df.select(
+        [
+            "entity_id",
+            "key1",
+            "key2",
+            "key3",
+        ]
+    )
+
+
+# --------------------------------------------------
+# Ground truth
+# --------------------------------------------------
+
+def load_ground_truth() -> pl.DataFrame:
+    """
+    Load ground truth and explode matched IDs.
+
+    Output:
+        source1_entity_id | target_id
+    """
+
+    ground_truth = (
+        pl.scan_csv(
+            TRAIN_GROUND_TRUTH,
+            separator="\t",
+            infer_schema=False,
+        )
+        .select(
+            [
+                pl.col("source1_entity_id")
+                .cast(pl.String),
+
+                pl.col("matched_entity_ids")
+                .cast(pl.String),
+            ]
+        )
+        .collect()
+    )
+
+    matches = (
+        ground_truth
+        .with_columns(
+            pl.col("matched_entity_ids")
+            .fill_null(pl.lit(""))
+            .str.split(by=",")
+            .alias("target_id")
+        )
+        .explode(
+            "target_id",
+            empty_as_null=True,
+        )
+        .with_columns(
+            pl.col("target_id")
+            .str.strip_chars()
+        )
+        .filter(
+            pl.col("target_id").is_not_null()
+            & (pl.col("target_id") != pl.lit(""))
+        )
+        .select(
+            [
+                "source1_entity_id",
+                pl.col("target_id").alias("target_id"),
+            ]
+        )
+    )
+
+    return matches
+
+
+# --------------------------------------------------
+# Load relevant source records
+# --------------------------------------------------
+
+def load_relevant_source(
+    path,
+    required_ids: set[str],
+) -> pl.DataFrame:
+    """
+    Read only the records whose entity IDs are required.
+
+    Uses Polars lazy scanning and filtering.
+    """
+
+    ids_df = pl.DataFrame(
+        {
+            "entity_id": list(required_ids)
+        }
+    )
+
+    df = (
+        pl.scan_csv(
+            path,
+            separator="\t",
+            infer_schema=False,
+        )
+        .select(
+            [
+                "entity_id",
+                "business_name",
+                "country",
+            ]
+        )
+        .join(
+            ids_df.lazy(),
+            on="entity_id",
+            how="inner",
+        )
+        .collect()
+    )
+
+    return add_blocking_keys(df)
+
+
+# --------------------------------------------------
+# Main evaluation
+# --------------------------------------------------
 
 def main():
-    t0 = time.time()
-    print("Loading GT...")
-    truth = load_ground_truth()
-    print(f"  {len(truth):,}  [{time.time()-t0:.1f}s]")
 
-    t0 = time.time()
-    print("Loading normalized sources...")
-    s1 = load_normalized("s1")
-    s2 = load_normalized("s2")
-    s3 = load_normalized("s3")
-    print(f"  S1={len(s1):,} S2={len(s2):,} S3={len(s3):,}  [{time.time()-t0:.1f}s]")
+    print("Loading ground truth...")
 
-    t0 = time.time()
-    s2_s = s2.sample(frac=S2_SAMPLE_RATE, random_state=RANDOM_SEED)
-    s3_s = s3.sample(frac=S2_SAMPLE_RATE, random_state=RANDOM_SEED)
-    print(f"  Sampled S2={len(s2_s):,} S3={len(s3_s):,}  [{time.time()-t0:.1f}s]")
-    del s2, s3
+    matches = load_ground_truth()
 
-    sampled_ids = set(s2_s["entity_id"]) | set(s3_s["entity_id"])
-    valid = [s1_id for s1_id, m in truth.items() if m and all(x in sampled_ids for x in m)]
-    print(f"  Valid S1: {len(valid):,}")
-    if S1_SAMPLE < len(valid):
-        import random
-        random.seed(RANDOM_SEED)
-        valid = random.sample(valid, S1_SAMPLE)
-    print(f"  Sampled S1 to {len(valid):,}")
+    source1_count = (
+        matches
+        .select("source1_entity_id")
+        .unique()
+        .height
+    )
 
-    t0 = time.time()
-    print("Building index...")
-    raw_index = build_index(s2_s.to_dict("records") + s3_s.to_dict("records"))
-    index = {k: v for k, v in raw_index.items() if len(v) <= 200}
-    print(f"  {len(raw_index):,} raw keys → {len(index):,} after bucket filter")
-    print(f"  {len(index):,} keys  [{time.time()-t0:.1f}s]")
+    print(
+        "Source 1 entities in ground truth:",
+        source1_count,
+    )
 
-    t0 = time.time()
-    print("Evaluating...")
-    valid_set = set(valid)
-    s1_eval = s1[s1["entity_id"].isin(valid_set)]
-    total = retained = 0
-    missing = []
-    cand_counts = []
-    for row in s1_eval.to_dict("records"):
-        keys = get_blocking_keys(row)
-        cand = set()
-        for key in sorted(keys, key=lambda item: 0 if "pin" in item[0] else 1):
-            cand.update(index.get(key, []))
-        if len(cand) > 20:
-            cand = set(sorted(cand)[:20])
-        cand_counts.append(len(cand))
-        for tgt in truth[row["entity_id"]]:
-            total += 1
-            if tgt in cand: retained += 1
-            else: missing.append((row["entity_id"], tgt))
-    print(f"  [{time.time()-t0:.1f}s]")
+    target_ids = (
+        matches
+        .select("target_id")
+        .unique()
+    )
 
-    print("\n" + "=" * 55)
-    print("SMOKE TEST")
-    print("=" * 55)
-    print(f"S1 evaluated:       {len(s1_eval):,}")
-    print(f"Total true matches: {total:,}")
-    print(f"Retained:           {retained:,}")
-    recall = retained/total*100 if total else 0
-    print(f"BLOCKING RECALL:    {recall:.2f}%")
-    if cand_counts:
-        print(f"Avg candidates / S1: {sum(cand_counts)/len(cand_counts):.1f}")
-    print("=" * 55)
+    print(
+        "True matched Source 2/3 IDs:",
+        target_ids.height,
+    )
+
+    # --------------------------------------------------
+    # Source 1
+    # --------------------------------------------------
+
+    print("\nReading Source 1...")
+
+    source1_ids = (
+        matches
+        .select(
+            pl.col("source1_entity_id")
+            .alias("entity_id")
+        )
+        .unique()
+    )
+
+    source1 = load_relevant_source(
+        TRAIN_SOURCE1,
+        set(source1_ids["entity_id"].to_list()),
+    )
+
+    print(
+        "Source 1 records loaded:",
+        source1.height,
+    )
+
+    # --------------------------------------------------
+    # Source 2
+    # --------------------------------------------------
+
+    print("\nReading Source 2...")
+
+    source2 = load_relevant_source(
+        TRAIN_SOURCE2,
+        set(target_ids["target_id"].to_list()),
+    )
+
+    print(
+        "Relevant Source 2 records:",
+        source2.height,
+    )
+
+    # --------------------------------------------------
+    # Source 3
+    # --------------------------------------------------
+
+    print("\nReading Source 3...")
+
+    source3 = load_relevant_source(
+        TRAIN_SOURCE3,
+        set(target_ids["target_id"].to_list()),
+    )
+
+    print(
+        "Relevant Source 3 records:",
+        source3.height,
+    )
+
+    # --------------------------------------------------
+    # Combine target blocking keys
+    # --------------------------------------------------
+
+    targets = pl.concat(
+        [
+            source2.select(
+                [
+                    "entity_id",
+                    "key1",
+                    "key2",
+                     "key3",
+                ]
+            ),
+            source3.select(
+                [
+                    "entity_id",
+                    "key1",
+                    "key2",
+                    "key3",
+                ]
+            ),
+        ]
+    )
+
+    # --------------------------------------------------
+    # Evaluate blocking
+    # --------------------------------------------------
+
+    evaluated = (
+        matches
+
+        # Attach Source 1 blocking keys
+        .join(
+            source1.rename(
+                {
+                    "entity_id": "source1_entity_id",
+                    "key1": "source1_key1",
+                    "key2": "source1_key2",
+                    "key3": "source1_key3",
+                }
+            ),
+            on="source1_entity_id",
+            how="left",
+        )
+
+        # Attach target blocking keys
+        .join(
+            targets.rename(
+                {
+                    "entity_id": "target_id",
+                    "key1": "target_key1",
+                    "key2": "target_key2",
+                    "key3": "target_key3",
+                }
+            ),
+            on="target_id",
+            how="left",
+        )
+
+        # Match survives if ANY blocking key matches.
+        .with_columns(
+           (
+    (
+        (pl.col("source1_key1") != pl.lit(""))
+        & (pl.col("target_key1") != pl.lit(""))
+        & (pl.col("source1_key1") == pl.col("target_key1"))
+    )
+    |
+    (
+        (pl.col("source1_key2") != pl.lit(""))
+        & (pl.col("target_key2") != pl.lit(""))
+        & (pl.col("source1_key2") == pl.col("target_key2"))
+    )
+    |
+    (
+        (pl.col("source1_key3") != pl.lit(""))
+        & (pl.col("target_key3") != pl.lit(""))
+        & (pl.col("source1_key3") == pl.col("target_key3"))
+    )
+).alias("retained")
+        )
+    )
+
+    # --------------------------------------------------
+    # Metrics
+    # --------------------------------------------------
+
+    total_true_matches = evaluated.height
+
+    retained_true_matches = (
+        evaluated
+        .filter(pl.col("retained"))
+        .height
+    )
+
+    lost_matches = (
+        total_true_matches
+        - retained_true_matches
+    )
+
+    if total_true_matches == 0:
+        print("\nNo true matches found.")
+        return
+
+    recall = (
+        retained_true_matches
+        / total_true_matches
+        * 100
+    )
+
+    print("\n" + "=" * 50)
+    print("BLOCKING EVALUATION")
+    print("=" * 50)
+
+    print(
+        f"Total true matches:       "
+        f"{total_true_matches:,}"
+    )
+
+    print(
+        f"Retained by blocking:     "
+        f"{retained_true_matches:,}"
+    )
+
+    print(
+        f"Lost during blocking:     "
+        f"{lost_matches:,}"
+    )
+
+    print(
+        f"Blocking recall:          "
+        f"{recall:.2f}%"
+    )
+
+    print("=" * 50)
 
 
 if __name__ == "__main__":

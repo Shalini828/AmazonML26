@@ -16,6 +16,12 @@ FILES = {
         TRAIN_DIR / "train_source1.tsv",
         PROCESSED_DIR / "train_source1.parquet",
     ),
+
+    "source2": (
+    TRAIN_DIR / "train_source2.tsv",
+    PROCESSED_DIR / "train_source2.parquet",
+),
+
     "source3": (
         TRAIN_DIR / "train_source3.tsv",
         PROCESSED_DIR / "train_source3.parquet",
