@@ -1,10 +1,10 @@
 source1_entity_id,target_entity_id,source1_name,target_name,source1_address,target_address,country,error_category
 S1-965667,S3-775321672,Maure Williams Colombier Inc,Dréxkor,"85 Wayne Avenue, Ticonderoga, NY","85 Wanye Avenue, Ticonderoga Townshiip, New York",US,address_variation
-S1-55344266,S3-384364074,Raj Investments LLP,ராஜ் இன்வெஸ்ட்மெண்ட்ஸ் எல்எல்பி,"6(29), C.I.T. Colony, 2Nd Main Road Mylapore, Chennai, Tamil Nadu","6(29), C.i.t. Colony, 2Nd Main Road Mylapore, Chennai, தமிழ்நாடு",India,cross_script
 S1-55344266,S2-249013014,Raj Investments LLP,ராஜ் இன்வெஸ்ட்மெண்ட்ஸ் எல்எல்பி,"6(29), C.I.T. Colony, 2Nd Main Road Mylapore, Chennai, Tamil Nadu","6(29), C.I.T. COLONY, 2ND MAIN ROAD MYLAPORE, CHENNAI, Tamil Nadu",India,cross_script
-S1-656753428,S3-679606215,Ss Food Private Limited,एसएस फूड प्राइवेट लिमिटेड,"Af-684, Nandgram Near Mother India Public School. Ph. 989, 9487203, Ghaziabad, Uttar Pradesh","Af-684, Ghaziabad, UP",India,cross_script
-S1-656753428,S2-153058913,Ss Food Private Limited,एसएस फूड प्राइवेट लिमिटेड,"Af-684, Nandgram Near Mother India Public School. Ph. 989, 9487203, Ghaziabad, Uttar Pradesh","AF-0684, NANDGRAM NEAR MOTHER INDIA PUBLIC SCHOOL. PH. 989, GHAZIABAD, 9487203, उत्तर प्रदेश",India,cross_script
+S1-55344266,S3-384364074,Raj Investments LLP,ராஜ் இன்வெஸ்ட்மெண்ட்ஸ் எல்எல்பி,"6(29), C.I.T. Colony, 2Nd Main Road Mylapore, Chennai, Tamil Nadu","6(29), C.i.t. Colony, 2Nd Main Road Mylapore, Chennai, தமிழ்நாடு",India,cross_script
 S1-656753428,S2-24659151,Ss Food Private Limited,एसएस फूड प्राइवेट लिमिटेड,"Af-684, Nandgram Near Mother India Public School. Ph. 989, 9487203, Ghaziabad, Uttar Pradesh","AF-0684, Uttar Pradesh, GHAZIABAD, 9487203",India,cross_script
+S1-656753428,S2-153058913,Ss Food Private Limited,एसएस फूड प्राइवेट लिमिटेड,"Af-684, Nandgram Near Mother India Public School. Ph. 989, 9487203, Ghaziabad, Uttar Pradesh","AF-0684, NANDGRAM NEAR MOTHER INDIA PUBLIC SCHOOL. PH. 989, GHAZIABAD, 9487203, उत्तर प्रदेश",India,cross_script
+S1-656753428,S3-679606215,Ss Food Private Limited,एसएस फूड प्राइवेट लिमिटेड,"Af-684, Nandgram Near Mother India Public School. Ph. 989, 9487203, Ghaziabad, Uttar Pradesh","Af-684, Ghaziabad, UP",India,cross_script
 S1-318373630,S2-660036492,Red Ventures Private Limited,रेड वेंचर्स प्राइवेट लिमिटेड,"Rajasthan, Jaipur, Banipark, Gokul Apartment, E-3A Kanti Chandra Road, G-1","G-1, BANIPARK, JAIPUR, Rajasthan",India,cross_script
 S1-789009573,S2-383871912,Hotel Enterprises Limited,होटल एंटरप्राइजेज लिमिटेड,"Wz-187C Shop No.13, 14 Kh. No.47 S/F. Vikaspuri Budhela Village Behind Oxford School, Delhi, West Delhi, Delhi","WZ-187C SHOP NO.13, DELHI, WEST DELHI, Delhi",India,cross_script
 S1-730934468,S3-352439310,Orellana Investments LLC,LLC Orellana Invsmbens,"728 A Quail Avenue, Fl Ground Floor, Geneva, IA","728 A Quail Avenue, Fl. Ground Floor, Geneva, Iowa",US,word_order_or_name_variation
@@ -13,9 +13,9 @@ S1-546142636,S2-392804085,Crystal Staffing Solutions LLC,LLC Crystal Sttfrifng S
 S1-274126313,S3-850112871,"Obsidian, LLC","Korbrixx D.B.A. Obsidian, LLC","3907 Hamilton Road, Deer Park, WA","3907 Hamilton Road, Deer Park, WA",US,name_noise
 S1-561341312,S2-483615364,Balaji Investment Private Limited,బాలాజీ ఇన్వెస్ట్‌మెంట్ ప్రైవేట్ లిమిటెడ్,"Plot No. D-88 & D-90, Hyd, Telangana, Hyderabad, Jeedimetla","H.NO 00516 PLOT NO. D-88 & D-90, JEEDIMETLA, HYD, HYDERABAD, Telangana",India,cross_script
 S1-777597828,S3-413669121,Uptown Pub,Solkeloquo,"6114 10th Avenue, Spokane Valley, WA","6114 Tenth Ave, Spokane Valley, Washington",US,address_variation
-S1-727602285,S2-947230367,Swastik Om Solutions LLP,स्वस्तिक ॐ सॉल्यूशंस एलएलपी,"201/D, Aditya, Svp Nagar Andheri (W), Mumbai, Mumbai City, Maharashtra","201/D, ADITYA, SVP NAGAR ANDHERI (W), BHIWANDI, MUMBAI CITY, Maharashtra",India,cross_script
 S1-727602285,S2-976870196,Swastik Om Solutions LLP,स्वस्तिक ॐ सॉल्यूशंस एलएलपी,"201/D, Aditya, Svp Nagar Andheri (W), Mumbai, Mumbai City, Maharashtra","201/D, BHIWANDI, MUMBAI CITY, Maharashtra",India,cross_script
-S1-292935703,S2-195749344,Cozy Grill,gcozy.com,"617 Fourth Street, Watseka, IL","617 FOURTH ST, WATSEKA, IL",US,address_dominant
+S1-727602285,S2-947230367,Swastik Om Solutions LLP,स्वस्तिक ॐ सॉल्यूशंस एलएलपी,"201/D, Aditya, Svp Nagar Andheri (W), Mumbai, Mumbai City, Maharashtra","201/D, ADITYA, SVP NAGAR ANDHERI (W), BHIWANDI, MUMBAI CITY, Maharashtra",India,cross_script
 S1-292935703,S3-533626303,Cozy Grill,Beloecto aka Cozy Grill,"617 Fourth Street, Watseka, IL","617 Fourth Street, Watseka, IL",US,dba_or_alias
+S1-292935703,S2-195749344,Cozy Grill,gcozy.com,"617 Fourth Street, Watseka, IL","617 FOURTH ST, WATSEKA, IL",US,address_dominant
 S1-314714647,S3-192802051,Seabird (India) Projects-Lucknow,Xylonexbrix,"Lucknow, 3/77, Lucknow, Vipul Khand, Opp. Study Hall School Gomtinagar, Uttar Pradesh","3/7, Lucknow, UP",India,address_variation
 S1-473377609,S3-433876173,Wave & Brothers Ltd,Belobrixlum,"Plot No. 65, Mahada Colony, Sai Nagar, Nagpur, Maharashtra","Door No 65, Mahada Colony, Sai Nagar, Nagpur, MH",India,address_dominant

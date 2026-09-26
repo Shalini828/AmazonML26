@@ -439,7 +439,7 @@ def main():
     "key8",
     "key9",
     "key10",
-    "key11"
+    "key11",
     "key12"
 ]
 
