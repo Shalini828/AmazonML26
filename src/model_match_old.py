@@ -5,63 +5,30 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-MODEL_PATH = PROJECT_ROOT / "data" / "rf_model.joblib"
+MODEL_PATH = PROJECT_ROOT / "data" / "rf_model_old.joblib"
 FEATURE_PATH = PROJECT_ROOT / "data" / "training_features.tsv"
 
-OUTPUT_PATH = PROJECT_ROOT / "data" / "model_predictions.tsv"
+OUTPUT_PATH = PROJECT_ROOT / "data" / "model_predictions_old.tsv"
 
 
-MODEL_FEATURES = [
-    "name_exact",
-    "name_compact_exact",
+OLD_MODEL_FEATURES = [
     "name_similarity",
-    "name_ratio",
-    "name_token_sort_similarity",
-    "name_token_similarity",
-    "name_token_set_similarity",
-    "name_token_overlap",
-    "name_jaro_winkler",
-    "name_ngram_similarity",
-    "name_weighted_similarity",
-    "name_length_ratio",
-
-    "address_exact",
-    "address_compact_exact",
     "address_similarity",
-    "address_ratio",
-    "address_token_sort_similarity",
+    "name_token_similarity",
     "address_token_similarity",
-    "address_token_set_similarity",
-    "address_token_overlap",
-    "address_jaro_winkler",
-    "address_ngram_similarity",
-    "address_weighted_similarity",
-    "address_length_ratio",
-
-    "house_number_match",
-    "house_number_exact_match",
-
     "country_match",
-    "source_country_missing",
-    "candidate_country_missing",
-    "country_both_present",
-
-    "postal_code_match",
-    "phone_match",
-    "email_match",
-    "website_match",
 ]
 
 
 def main():
 
     print("=" * 60)
-    print("MODEL MATCHING")
+    print("OLD MODEL MATCHING")
     print("=" * 60)
 
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
-            f"Model file not found: {MODEL_PATH}"
+            f"Old model not found: {MODEL_PATH}"
         )
 
     if not FEATURE_PATH.exists():
@@ -69,32 +36,11 @@ def main():
             f"Feature file not found: {FEATURE_PATH}"
         )
 
-    print("\nLoading trained model...")
+    print("\nLoading old trained model...")
 
-    saved_object = joblib.load(MODEL_PATH)
+    model = joblib.load(MODEL_PATH)
 
-    print("Saved object type:")
-    print(type(saved_object).__name__)
-
-    if isinstance(saved_object, dict):
-
-        if "model" not in saved_object:
-            raise ValueError(
-                "rf_model.joblib is a dictionary, "
-                "but it does not contain a 'model' key."
-            )
-
-        model = saved_object["model"]
-
-        print("Extracted model from dictionary.")
-
-    else:
-
-        model = saved_object
-
-        print("Loaded model directly.")
-
-    print("Actual model type:")
+    print("Model type:")
     print(type(model).__name__)
 
     print("\nLoading feature data...")
@@ -107,24 +53,11 @@ def main():
     print("Rows:", len(df))
     print("Columns:", len(df.columns))
 
-    required_columns = [
-        "source1_entity_id",
-        "candidate_entity_id",
-    ]
-
-    for column in required_columns:
-
-        if column not in df.columns:
-
-            raise ValueError(
-                f"Required column missing: {column}"
-            )
-
-    print("\nChecking model features...")
+    print("\nChecking old model features...")
 
     missing_features = [
         feature
-        for feature in MODEL_FEATURES
+        for feature in OLD_MODEL_FEATURES
         if feature not in df.columns
     ]
 
@@ -136,16 +69,16 @@ def main():
             print("  -", feature)
 
         raise ValueError(
-            "Feature mismatch detected."
+            "Old model feature mismatch detected."
         )
 
-    print("All model features available.")
+    print("All old model features available.")
 
-    print("\nBuilding model input...")
+    print("\nBuilding old model input...")
 
-    X = df[MODEL_FEATURES].copy()
+    X = df[OLD_MODEL_FEATURES].copy()
 
-    for column in MODEL_FEATURES:
+    for column in OLD_MODEL_FEATURES:
 
         X[column] = pd.to_numeric(
             X[column],
@@ -159,7 +92,7 @@ def main():
         X.shape
     )
 
-    print("\nGenerating predictions...")
+    print("\nGenerating old model predictions...")
 
     predictions = model.predict(X)
 
@@ -178,7 +111,8 @@ def main():
                 positive_index = classes.index(1)
 
                 match_probability = probabilities[
-                    :, positive_index
+                    :,
+                    positive_index
                 ]
 
             else:
@@ -213,7 +147,7 @@ def main():
     )
 
     print("\n" + "=" * 60)
-    print("MODEL MATCHING COMPLETE")
+    print("OLD MODEL MATCHING COMPLETE")
     print("=" * 60)
 
     print(
@@ -251,7 +185,7 @@ def main():
         output["match_probability"].describe()
     )
 
-    print("\nSaved predictions to:")
+    print("\nSaved old predictions to:")
 
     print(OUTPUT_PATH)
 
