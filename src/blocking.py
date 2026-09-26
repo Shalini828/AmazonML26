@@ -115,6 +115,7 @@ def create_blocking_key(df: pl.DataFrame) -> pl.DataFrame:
     name = pl.col("business_name_normalized").fill_null("")
     longest = pl.col("longest_name_word").fill_null("")
     pincode = pl.col("pincode").fill_null("")
+    address = pl.col("business_address_normalized").fill_null("")
 
     df = df.with_columns(
         [
@@ -173,8 +174,61 @@ def create_blocking_key(df: pl.DataFrame) -> pl.DataFrame:
                 + pl.lit("_")
                 + name
             ).alias("blocking_key_7"),
-        ]
-    )
+
+            # Rule 8: Country + first address token
+            (
+                country
+                + pl.lit("_")
+                + address.str.split(" ").list.first()
+            ).alias("blocking_key_8"),
+
+            # Rule 9: Country + first two address tokens
+            (
+                country
+                + pl.lit("_")
+                + address.str.split(" ").list.slice(0, 2).list.join("_")
+            ).alias("blocking_key_9"),
+
+            # Rule 10: Country + first address number
+            (
+                country
+                + pl.lit("_")
+                + address.str.extract(r"(\d+)", 1).fill_null("")
+            ).alias("blocking_key_10"),
+
+            # Rule 11: Country + normalized first address number
+            (
+                country
+                + pl.lit("_")
+                + address.str.extract(r"(\d+)", 1)
+                    .fill_null("")
+                    .str.replace(r"^0+", "")
+            ).alias("blocking_key_11"),
+
+            # Rule 12: Country + first two useful address tokens
+            (
+                country
+                + pl.lit("_")
+                + address.str.to_lowercase()
+                    .str.extract_all(r"[a-z]{4,}")
+                    .list.eval(
+                        pl.element().filter(
+                            ~pl.element().is_in([
+                                "street", "road", "drive", "avenue", "lane",
+                                "court", "place", "boulevard", "highway",
+                                "north", "south", "east", "west", "india",
+                                "city", "county", "floor", "unit", "suite",
+                                "near", "area", "district"
+                            ])
+                        )
+                    )
+                    .list.unique()
+                    .list.sort()
+                    .list.head(2)
+                    .list.join("_")
+            ).alias("blocking_key_12"),
+                    ]
+                )
 
     return df
 
@@ -198,6 +252,11 @@ def build_block_index(df: pl.DataFrame):
         "blocking_key_5",
         "blocking_key_6",
         "blocking_key_7",
+        "blocking_key_8",
+        "blocking_key_9",
+        "blocking_key_10",
+        "blocking_key_11",
+        "blocking_key_12",
     ]
 
     index = {}
@@ -241,6 +300,11 @@ def get_candidates(row, index):
         "blocking_key_5",
         "blocking_key_6",
         "blocking_key_7",
+        "blocking_key_8",
+        "blocking_key_9",
+        "blocking_key_10",
+        "blocking_key_11",
+        "blocking_key_12",
     ]
 
     for key_column in key_columns:
@@ -290,6 +354,11 @@ if __name__ == "__main__":
                 "blocking_key_5",
                 "blocking_key_6",
                 "blocking_key_7",
+                "blocking_key_8",
+                "blocking_key_9",
+                "blocking_key_10",
+                "blocking_key_11",
+                "blocking_key_12",
             ]
         )
     )

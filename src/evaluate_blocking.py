@@ -9,10 +9,10 @@ from config import (
 
 from normalization import (
     normalize_business_name,
+    normalize_address,
     normalize_country,
     extract_pincode,
 )
-
 
 # --------------------------------------------------
 # Normalization + blocking keys
@@ -163,7 +163,73 @@ def add_blocking_keys(df: pl.DataFrame) -> pl.DataFrame:
         ]
     )
 
+# Address-based blocking keys
+    address = (
+        pl.col("business_address")
+        .map_elements(
+            normalize_address,
+            return_dtype=pl.String,
+        )
+        .fill_null("")
+    )
+
+    df = df.with_columns(
+        [
+            (
+                country
+                + pl.lit("_")
+                + address.str.split(" ").list.first()
+            ).alias("key8"),
+
+            (
+                country
+                + pl.lit("_")
+                + address.str.split(" ").list.slice(0, 2).list.join("_")
+            ).alias("key9"),
+
+            (
+                country
+                + pl.lit("_")
+                + address.str.extract(r"(\d+)", 1)
+            ).alias("key10"),
+
+                        # Rule 11: country + first address number, leading zeros removed
+            (
+                country
+                + "_"
+                + address
+                .str.extract(r"(\d+)", 1)
+                .fill_null("")
+                .str.replace(r"^0+", "")
+            ).alias("key11"),
+
+            # Rule 12: country + first two useful address tokens
+(
+    country
+    + "_"
+    + address.str.to_lowercase()
+        .str.extract_all(r"[a-z]{4,}")
+        .list.eval(
+            pl.element().filter(
+                ~pl.element().is_in([
+                    "street", "road", "drive", "avenue", "lane",
+                    "court", "place", "boulevard", "highway",
+                    "north", "south", "east", "west", "india",
+                    "city", "county", "floor", "unit", "suite",
+                    "near", "area", "district"
+                ])
+            )
+        )
+        .list.unique()
+        .list.sort()
+        .list.head(2)
+        .list.join("_")
+).alias("key12"),
+        ]
+    )
+
     return df
+
 
 
 # --------------------------------------------------
@@ -362,15 +428,20 @@ def main():
     # --------------------------------------------------
 
     target_columns = [
-        "entity_id",
-        "key1",
-        "key2",
-        "key3",
-        "key4",
-        "key5",
-        "key6",
-        "key7",
-    ]
+    "entity_id",
+    "key1",
+    "key2",
+    "key3",
+    "key4",
+    "key5",
+    "key6",
+    "key7",
+    "key8",
+    "key9",
+    "key10",
+    "key11"
+    "key12"
+]
 
     targets = pl.concat(
         [
@@ -393,6 +464,11 @@ def main():
             "key5": "source1_key5",
             "key6": "source1_key6",
             "key7": "source1_key7",
+            "key8": "source1_key8",
+            "key9": "source1_key9",
+            "key10": "source1_key10",
+            "key11": "source1_key11",
+            "key12": "source1_key12",
         }
     )
 
@@ -410,6 +486,11 @@ def main():
             "key5": "target_key5",
             "key6": "target_key6",
             "key7": "target_key7",
+            "key8": "target_key8",
+            "key9": "target_key9",
+            "key10": "target_key10",
+            "key11": "target_key11",
+            "key12": "target_key12",
         }
     )
 
@@ -493,9 +574,48 @@ def main():
                         == pl.col("target_key7")
                     )
                 )
+                |
+                (
+                    (pl.col("source1_key8") != "")
+                    & (pl.col("target_key8") != "")
+                    & (
+                        pl.col("source1_key8")
+                        == pl.col("target_key8")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key9") != "")
+                    & (pl.col("target_key9") != "")
+                    & (
+                        pl.col("source1_key9")
+                        == pl.col("target_key9")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key10") != "")
+                    & (pl.col("target_key10") != "")
+                    & (
+                        pl.col("source1_key10")
+                        == pl.col("target_key10")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key11") != "")
+                    & (pl.col("target_key11") != "")
+                    & (
+                        pl.col("source1_key11")
+                        == pl.col("target_key11")
+                    )
+                )
+
+
             ).alias("retained")
         )
     )
+    
 
     # --------------------------------------------------
     # Metrics

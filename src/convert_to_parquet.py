@@ -32,6 +32,22 @@ FILES = {
     ),
 }
 
+TEST_DIR = PROJECT_ROOT / "data" / "dataset" / "test"
+
+FILES.update({
+    "test_source1": (
+        TEST_DIR / "test_source1.tsv",
+        PROCESSED_DIR / "test_source1.parquet",
+    ),
+    "test_source2": (
+        TEST_DIR / "test_source2.tsv",
+        PROCESSED_DIR / "test_source2.parquet",
+    ),
+    "test_source3": (
+        TEST_DIR / "test_source3.tsv",
+        PROCESSED_DIR / "test_source3.parquet",
+    ),
+})
 
 for name, (input_file, output_file) in FILES.items():
 
