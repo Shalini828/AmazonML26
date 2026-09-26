@@ -3,7 +3,7 @@ from pathlib import Path
 
 # Project root
 DATA_ROOT = Path(
-    r"C:\Users\R K SINGH\Downloads\6ab10eb3b23ba_student_resource\student_resource"
+    r"c:\Users\shali\Downloads\6ab10eb3b23ba_student_resource\student_resource"
 )
 
 

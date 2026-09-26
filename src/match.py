@@ -1,187 +1,680 @@
-"""Disk-backed emergency entity matcher.
-
-Target records and joins live in DuckDB; Python only configures queries and
-never builds per-entity or per-candidate dictionaries.
-"""
 from pathlib import Path
-import duckdb
+import polars as pl
+import re
 
+
+# ============================================================
+# PATHS
+# ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEST_DIR = PROJECT_ROOT / "data" / "dataset" / "test"
 OUTPUT_DIR = PROJECT_ROOT / "output"
+
 S1_PATH = TEST_DIR / "test_source1.tsv"
 S2_PATH = TEST_DIR / "test_source2.tsv"
 S3_PATH = TEST_DIR / "test_source3.tsv"
+
 CANDIDATE_OUTPUT = OUTPUT_DIR / "candidate_pairs.tsv"
 MATCH_OUTPUT = OUTPUT_DIR / "matching_results.tsv"
-DB_PATH = OUTPUT_DIR / "matcher_work.duckdb"
-MAX_CANDIDATES_PER_BLOCK = 5
 
 
-def sql_path(path: Path) -> str:
-    return str(path.resolve()).replace("\\", "/").replace("'", "''")
+# ============================================================
+# FAST POLARS NORMALIZATION
+# ============================================================
+
+LEGAL_SUFFIXES = [
+    "incorporated",
+    "corporation",
+    "company",
+    "private",
+    "limited",
+    "proprietor",
+    "inc",
+    "corp",
+    "llc",
+    "ltd",
+    "llp",
+    "plc",
+    "pvt",
+    "opc",
+    "huf",
+    "prop",
+    "co",
+]
 
 
-def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    temp_dir = OUTPUT_DIR / "duckdb_temp"
-    temp_dir.mkdir(exist_ok=True)
+def normalized_expr(column: str) -> pl.Expr:
+    """
+    Fast native Polars normalization.
 
-    print("Starting disk-backed matcher (DuckDB memory limit: 2 GB)...", flush=True)
-    con = duckdb.connect(str(DB_PATH))
-    con.execute("SET memory_limit='2GB'")
-    con.execute(f"SET temp_directory='{sql_path(temp_dir)}'")
-    con.execute("SET preserve_insertion_order=false")
-    con.execute("SET threads=4")
+    No Python apply/map_elements on millions of rows.
+    """
 
-    def source_sql(path: Path) -> str:
-        return f"read_csv('{sql_path(path)}', delim='\\t', header=true, all_varchar=true, quote='\"', escape='\"')"
+    expr = (
+        pl.col(column)
+        .cast(pl.String)
+        .fill_null("")
+        .str.to_lowercase()
+    )
 
-    # Match normalization.py's lowercase, ampersand expansion and punctuation
-    # removal while doing the work once in the source staging tables.
-    def norm(column: str) -> str:
-        value = f"lower(coalesce(cast({column} AS VARCHAR), ''))"
-        value = f"replace({value}, '&', ' and ')"
-        value = f"regexp_replace({value}, '[^[:alnum:][:space:]]', ' ', 'g')"
-        return f"trim(regexp_replace({value}, '[[:space:]]+', ' ', 'g'))"
+    # Ampersand -> and
+    expr = expr.str.replace_all("&", " and ")
 
-    existing_tables = {row[0] for row in con.execute("SHOW TABLES").fetchall()}
-    if "target" not in existing_tables:
-        print("Staging Source 2 and Source 3 on disk...", flush=True)
-        con.execute(f"""
-        CREATE TABLE target AS
-        SELECT entity_id, business_name, business_address, country,
-               n_name, n_address, n_country,
-               n_country || '*' || substr(n_name, 1, 1) AS key1,
-               n_country || '_' || substr(n_name, 1, 4) AS key2,
-               n_country || '_' || substr(n_name, 1, 3) AS key3
-        FROM (
-            SELECT cast(entity_id AS VARCHAR) entity_id,
-                   cast(business_name AS VARCHAR) business_name,
-                   cast(business_address AS VARCHAR) business_address,
-                   cast(country AS VARCHAR) country,
-                   {norm('business_name')} n_name,
-                   {norm('business_address')} n_address,
-                   {norm('country')} n_country
-            FROM {source_sql(S2_PATH)}
-            UNION ALL
-            SELECT cast(entity_id AS VARCHAR), cast(business_name AS VARCHAR),
-                   cast(business_address AS VARCHAR), cast(country AS VARCHAR),
-                   {norm('business_name')}, {norm('business_address')}, {norm('country')}
-            FROM {source_sql(S3_PATH)}
+    # Punctuation -> space
+    expr = expr.str.replace_all(r"[^[:alnum:][:space:]]", " ")
+
+    # Collapse whitespace
+    expr = expr.str.replace_all(r"\s+", " ")
+
+    return expr.str.strip_chars()
+
+
+def name_expr() -> pl.Expr:
+    """
+    Normalize business names and remove common legal suffixes.
+    """
+
+    expr = normalized_expr("business_name")
+
+    for suffix in LEGAL_SUFFIXES:
+        expr = expr.str.replace_all(
+            rf"(?i)\b{re.escape(suffix)}\b",
+            " ",
         )
-        """)
-    print(f"Targets staged: {con.execute('SELECT count(*) FROM target').fetchone()[0]:,}", flush=True)
 
-    if "source1" not in existing_tables:
-        print("Staging Source 1...", flush=True)
-        con.execute(f"""
-        CREATE TABLE source1 AS
-        SELECT entity_id, business_name, business_address, country,
-               n_name, n_address, n_country,
-               n_country || '*' || substr(n_name, 1, 1) AS key1,
-               n_country || '_' || substr(n_name, 1, 4) AS key2,
-               n_country || '_' || substr(n_name, 1, 3) AS key3
-        FROM (
-            SELECT cast(entity_id AS VARCHAR) entity_id,
-                   cast(business_name AS VARCHAR) business_name,
-                   cast(business_address AS VARCHAR) business_address,
-                   cast(country AS VARCHAR) country,
-                   {norm('business_name')} n_name,
-                   {norm('business_address')} n_address,
-                   {norm('country')} n_country
-            FROM {source_sql(S1_PATH)}
+    expr = expr.str.replace_all(r"\s+", " ")
+    return expr.str.strip_chars()
+
+
+def address_expr() -> pl.Expr:
+    """
+    Normalize addresses.
+    """
+
+    expr = normalized_expr("business_address")
+
+    replacements = {
+        r"\brd\b": "road",
+        r"\bst\b": "street",
+        r"\bave\b": "avenue",
+        r"\bav\b": "avenue",
+        r"\bblvd\b": "boulevard",
+        r"\bdr\b": "drive",
+        r"\bln\b": "lane",
+        r"\bct\b": "court",
+        r"\bpl\b": "place",
+        r"\bsq\b": "square",
+        r"\bhwy\b": "highway",
+        r"\bpkwy\b": "parkway",
+        r"\bapt\b": "apartment",
+        r"\bste\b": "suite",
+        r"\bfl\b": "floor",
+    }
+
+    for pattern, replacement in replacements.items():
+        expr = expr.str.replace_all(pattern, replacement)
+
+    expr = expr.str.replace_all(r"\s+", " ")
+    return expr.str.strip_chars()
+
+
+def country_expr() -> pl.Expr:
+    """
+    Normalize country names.
+    """
+
+    expr = normalized_expr("country")
+
+    return (
+        pl.when(expr.is_in(["usa", "united states", "united states of america", "us"]))
+        .then(pl.lit("us"))
+        .when(expr.is_in(["india", "bharat", "in"]))
+        .then(pl.lit("india"))
+        .when(expr.is_in(["france", "fr"]))
+        .then(pl.lit("france"))
+        .otherwise(expr)
+    )
+
+
+# ============================================================
+# LOAD + NORMALIZE
+# ============================================================
+
+def load_source(path: Path) -> pl.DataFrame:
+
+    print(f"Loading {path.name}...", flush=True)
+
+    df = pl.read_csv(
+        path,
+        separator="\t",
+        infer_schema=False,
+        ignore_errors=False,
+    )
+
+    required = [
+        "entity_id",
+        "business_name",
+        "business_address",
+        "country",
+    ]
+
+    df = df.select(required)
+
+    df = df.with_columns(
+        [
+            name_expr().alias("name_norm"),
+            address_expr().alias("address_norm"),
+            country_expr().alias("country_norm"),
+        ]
+    )
+
+    # Strong matching keys
+    df = df.with_columns(
+        [
+            (
+                pl.col("country_norm")
+                + pl.lit("|")
+                + pl.col("name_norm")
+            ).alias("name_key"),
+
+            (
+                pl.col("country_norm")
+                + pl.lit("|")
+                + pl.col("address_norm")
+            ).alias("address_key"),
+
+            (
+                pl.col("country_norm")
+                + pl.lit("|")
+                + pl.col("name_norm").str.slice(0, 4)
+            ).alias("name4_key"),
+
+            (
+                pl.col("country_norm")
+                + pl.lit("|")
+                + pl.col("name_norm").str.slice(0, 6)
+            ).alias("name6_key"),
+        ]
+    )
+
+    return df
+
+
+# ============================================================
+# BUILD CANDIDATES
+# ============================================================
+
+def build_candidates(
+    source1: pl.DataFrame,
+    targets: pl.DataFrame,
+) -> pl.DataFrame:
+
+    print("Building exact-name candidates...", flush=True)
+
+    # --------------------------------------------------------
+    # 1. Exact normalized name + country
+    # --------------------------------------------------------
+
+    name_candidates = (
+        source1
+        .select(
+            [
+                "entity_id",
+                "name_key",
+            ]
         )
-        """)
+        .filter(pl.col("name_key") != "")
+        .join(
+            targets.select(
+                [
+                    "entity_id",
+                    "name_key",
+                ]
+            ),
+            on="name_key",
+            how="inner",
+            suffix="_target",
+        )
+        .select(
+            [
+                pl.col("entity_id").alias("source1_entity_id"),
+                pl.col("entity_id_target").alias("candidate_entity_id"),
+            ]
+        )
+    )
 
-    # Aggregate each of the three prescribed blocks before joining. max_by
-    # keeps a small, deterministic ID sample per block and prevents any all-pairs
-    # join or unbounded candidate list from being materialized.
-    if "candidate_rows" in existing_tables:
-        con.execute("DROP TABLE candidate_rows")
-    if "block_candidates" in existing_tables:
-        con.execute("DROP TABLE block_candidates")
-    print("Aggregating bounded blocked candidate lists...", flush=True)
-    con.execute(f"""
-        CREATE TABLE block_candidates AS
-        SELECT 'key1' AS block_type, key1 AS block_key,
-               max_by(entity_id, entity_id, {MAX_CANDIDATES_PER_BLOCK}) AS ids
-        FROM target WHERE n_name<>'' GROUP BY key1
-        UNION ALL
-        SELECT 'key2', key2,
-               max_by(entity_id, entity_id, {MAX_CANDIDATES_PER_BLOCK})
-        FROM target WHERE n_name<>'' GROUP BY key2
-        UNION ALL
-        SELECT 'key3', key3,
-               max_by(entity_id, entity_id, {MAX_CANDIDATES_PER_BLOCK})
-        FROM target WHERE n_name<>'' GROUP BY key3
-        """)
-    con.execute("""
-        CREATE TABLE candidate_rows AS
-        SELECT s.entity_id AS s1_id,
-               list_sort(list_distinct(list_concat(
-                   coalesce(k1.ids, []::VARCHAR[]),
-                   coalesce(k2.ids, []::VARCHAR[]),
-                   coalesce(k3.ids, []::VARCHAR[])
-               ))) AS ids
-        FROM source1 s
-        LEFT JOIN block_candidates k1 ON k1.block_type='key1' AND s.key1=k1.block_key AND s.n_name<>''
-        LEFT JOIN block_candidates k2 ON k2.block_type='key2' AND s.key2=k2.block_key AND s.n_name<>''
-        LEFT JOIN block_candidates k3 ON k3.block_type='key3' AND s.key3=k3.block_key AND s.n_name<>''
-    """)
-    candidate_count = con.execute("SELECT sum(len(ids)) FROM candidate_rows").fetchone()[0] or 0
-    print(f"Candidate pairs retained: {candidate_count:,}", flush=True)
+    print(
+        f"Exact-name candidate rows: {name_candidates.height:,}",
+        flush=True,
+    )
 
-    print("Writing candidate output...", flush=True)
-    con.execute(f"""
-        COPY (
-            SELECT s1_id AS source1_entity_id,
-                   array_to_string(ids, ',') AS candidate_entity_ids
-            FROM candidate_rows
-        ) TO '{sql_path(CANDIDATE_OUTPUT)}'
-        (DELIMITER '\t', HEADER true, QUOTE '"', ESCAPE '"')
-    """)
+    # --------------------------------------------------------
+    # 2. Exact normalized address + country
+    # --------------------------------------------------------
 
-    print("Writing deterministic exact-match output...", flush=True)
-    # Exact normalized-name agreement is the stable emergency decision rule;
-    # exact address agreement breaks ties when several names are identical.
-    con.execute(f"""
-        COPY (
-            WITH choices AS (
-                SELECT s.entity_id AS s1_id, u.candidate_id,
-                       row_number() OVER (
-                           PARTITION BY s.entity_id
-                           ORDER BY (s.n_name=t.n_name AND s.n_name<>'') DESC,
-                                    (s.n_address=t.n_address AND s.n_address<>'') DESC,
-                                     u.candidate_id
-                       ) AS choice_rank
-                FROM source1 s
-                JOIN candidate_rows c ON c.s1_id=s.entity_id
-                CROSS JOIN UNNEST(c.ids) u(candidate_id)
-                JOIN target t ON t.key2=s.key2 AND t.n_name=s.n_name
-                             AND t.entity_id=u.candidate_id
-                WHERE s.n_name<>''
-            ), selected AS (
-                SELECT s1_id, candidate_id FROM choices WHERE choice_rank=1
+    print("Building exact-address candidates...", flush=True)
+
+    address_candidates = (
+        source1
+        .select(
+            [
+                "entity_id",
+                "address_key",
+            ]
+        )
+        .filter(pl.col("address_key") != "")
+        .join(
+            targets.select(
+                [
+                    "entity_id",
+                    "address_key",
+                ]
+            ),
+            on="address_key",
+            how="inner",
+            suffix="_target",
+        )
+        .select(
+            [
+                pl.col("entity_id").alias("source1_entity_id"),
+                pl.col("entity_id_target").alias("candidate_entity_id"),
+            ]
+        )
+    )
+
+    print(
+        f"Exact-address candidate rows: {address_candidates.height:,}",
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # 3. Exact name + exact address
+    #    Very high precision.
+    # --------------------------------------------------------
+
+    print("Building exact name+address candidates...", flush=True)
+
+    strong_candidates = (
+        source1
+        .select(
+            [
+                "entity_id",
+                "name_key",
+                "address_key",
+            ]
+        )
+        .filter(
+            (pl.col("name_key") != "")
+            & (pl.col("address_key") != "")
+        )
+        .join(
+            targets.select(
+                [
+                    "entity_id",
+                    "name_key",
+                    "address_key",
+                ]
+            ),
+            on=["name_key", "address_key"],
+            how="inner",
+            suffix="_target",
+        )
+        .select(
+            [
+                pl.col("entity_id").alias("source1_entity_id"),
+                pl.col("entity_id_target").alias("candidate_entity_id"),
+            ]
+        )
+    )
+
+    print(
+        f"Strong candidates: {strong_candidates.height:,}",
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # Combine candidates
+    # --------------------------------------------------------
+
+    candidates = (
+        pl.concat(
+            [
+                name_candidates,
+                address_candidates,
+                strong_candidates,
+            ],
+            how="vertical",
+        )
+        .unique(
+            [
+                "source1_entity_id",
+                "candidate_entity_id",
+            ]
+        )
+    )
+
+    print(
+        f"Unique candidate pairs: {candidates.height:,}",
+        flush=True,
+    )
+
+    return candidates
+
+
+# ============================================================
+# SCORE CANDIDATES
+# ============================================================
+
+def build_matches(
+    source1: pl.DataFrame,
+    targets: pl.DataFrame,
+    candidates: pl.DataFrame,
+) -> pl.DataFrame:
+
+    print("Scoring candidates...", flush=True)
+
+    s1 = source1.select(
+        [
+            pl.col("entity_id").alias("source1_entity_id"),
+            "name_key",
+            "address_key",
+            "country_norm",
+            "name_norm",
+            "address_norm",
+        ]
+    )
+
+    tgt = targets.select(
+        [
+            pl.col("entity_id").alias("candidate_entity_id"),
+            "name_key",
+            "address_key",
+            "country_norm",
+            "name_norm",
+            "address_norm",
+        ]
+    )
+
+    scored = (
+        candidates
+        .join(s1, on="source1_entity_id", how="left")
+        .join(tgt, on="candidate_entity_id", how="left", suffix="_target")
+        .with_columns(
+            [
+                (
+                    pl.col("name_key")
+                    == pl.col("name_key_target")
+                ).cast(pl.Int8).alias("exact_name"),
+
+                (
+                    pl.col("address_key")
+                    == pl.col("address_key_target")
+                ).cast(pl.Int8).alias("exact_address"),
+
+                (
+                    pl.col("country_norm")
+                    == pl.col("country_norm_target")
+                ).cast(pl.Int8).alias("same_country"),
+
+                (
+                    pl.col("name_norm")
+                    .str.len_chars()
+                    ==
+                    pl.col("name_norm_target")
+                    .str.len_chars()
+                ).cast(pl.Int8).alias("same_name_length"),
+            ]
+        )
+        .with_columns(
+            (
+                pl.col("exact_name") * 100
+                + pl.col("exact_address") * 80
+                + pl.col("same_country") * 20
+                + pl.col("same_name_length") * 5
+            ).alias("score")
+        )
+    )
+
+    # --------------------------------------------------------
+    # Important:
+    # Keep all exact-name matches when the normalized name is
+    # reasonably specific.
+    #
+    # For very common names, require address agreement.
+    # This protects precision/F0.5.
+    # --------------------------------------------------------
+
+    name_frequency = (
+        targets
+        .group_by("name_key")
+        .agg(
+            pl.len().alias("target_name_count")
+        )
+    )
+
+    scored = scored.join(
+        name_frequency,
+        on="name_key_target",
+        how="left",
+    )
+
+    # Rules:
+    #
+    # A) exact name + same country and name occurs <= 10 times
+    # B) exact name + exact address
+    # C) exact address + same country
+    #
+    matched = scored.filter(
+        (
+            (
+                (pl.col("exact_name") == 1)
+                & (pl.col("same_country") == 1)
+                & (pl.col("target_name_count") <= 10)
             )
-            SELECT s.entity_id AS source1_entity_id,
-                   coalesce(x.candidate_id, '') AS matched_entity_ids
-            FROM source1 s LEFT JOIN selected x ON x.s1_id=s.entity_id
-        ) TO '{sql_path(MATCH_OUTPUT)}'
-        (DELIMITER '\t', HEADER true, QUOTE '"', ESCAPE '"')
-    """)
-    source_count = con.execute("SELECT count(*) FROM source1").fetchone()[0]
-    matched_count = con.execute("SELECT count(*) FROM (SELECT DISTINCT s1_id FROM candidate_rows c CROSS JOIN UNNEST(c.ids) u(candidate_id) JOIN target t ON t.entity_id=u.candidate_id JOIN source1 s ON s.entity_id=c.s1_id WHERE s.n_name=t.n_name AND s.n_name<>'')").fetchone()[0]
-    con.close()
+            |
+            (
+                (pl.col("exact_name") == 1)
+                & (pl.col("exact_address") == 1)
+            )
+            |
+            (
+                (pl.col("exact_address") == 1)
+                & (pl.col("same_country") == 1)
+            )
+        )
+    )
 
-    print("MATCHER COMPLETE", flush=True)
-    print(f"Source 1 rows: {source_count:,}", flush=True)
-    print(f"Candidate pairs: {candidate_count:,}", flush=True)
-    print(f"Predicted matches: {matched_count:,}", flush=True)
-    print(f"Candidate output: {CANDIDATE_OUTPUT} ({CANDIDATE_OUTPUT.stat().st_size:,} bytes)", flush=True)
-    print(f"Match output: {MATCH_OUTPUT} ({MATCH_OUTPUT.stat().st_size:,} bytes)", flush=True)
+    print(
+        f"Candidate matches before grouping: {matched.height:,}",
+        flush=True,
+    )
+
+    # --------------------------------------------------------
+    # Group back to one row per Source-1.
+    # --------------------------------------------------------
+
+    result = (
+        matched
+        .group_by("source1_entity_id")
+        .agg(
+            pl.col("candidate_entity_id")
+            .unique()
+            .sort()
+            .str.join(",")
+            .alias("matched_entity_ids")
+        )
+    )
+
+    return result
 
 
-if __name__ == '__main__':
+# ============================================================
+# WRITE OUTPUTS
+# ============================================================
+
+def write_outputs(
+    source1: pl.DataFrame,
+    candidates: pl.DataFrame,
+    matches: pl.DataFrame,
+) -> None:
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # --------------------------------------------------------
+    # Candidate output
+    # --------------------------------------------------------
+
+    candidate_output = (
+        source1
+        .select(
+            pl.col("entity_id")
+            .alias("source1_entity_id")
+        )
+        .join(
+            candidates
+            .group_by("source1_entity_id")
+            .agg(
+                pl.col("candidate_entity_id")
+                .unique()
+                .sort()
+                .str.join(",")
+                .alias("candidate_entity_ids")
+            ),
+            on="source1_entity_id",
+            how="left",
+        )
+        .with_columns(
+            pl.col("candidate_entity_ids")
+            .fill_null("")
+        )
+    )
+
+    print("Writing candidate_pairs.tsv...", flush=True)
+
+    candidate_output.write_csv(
+        CANDIDATE_OUTPUT,
+        separator="\t",
+    )
+
+    # --------------------------------------------------------
+    # Matching output
+    # --------------------------------------------------------
+
+    matching_output = (
+        source1
+        .select(
+            pl.col("entity_id")
+            .alias("source1_entity_id")
+        )
+        .join(
+            matches,
+            on="source1_entity_id",
+            how="left",
+        )
+        .with_columns(
+            pl.col("matched_entity_ids")
+            .fill_null("")
+        )
+    )
+
+    print("Writing matching_results.tsv...", flush=True)
+
+    matching_output.write_csv(
+        MATCH_OUTPUT,
+        separator="\t",
+    )
+
+    print()
+    print("=" * 60)
+    print("MATCHING COMPLETE")
+    print("=" * 60)
+    print(
+        f"Source 1 rows:       {source1.height:,}"
+    )
+    print(
+        f"Candidate pairs:     {candidates.height:,}"
+    )
+    print(
+        f"Matched S1 entities:  {matches.height:,}"
+    )
+    print(
+        f"Candidate file:      {CANDIDATE_OUTPUT}"
+    )
+    print(
+        f"Matching file:       {MATCH_OUTPUT}"
+    )
+    print("=" * 60)
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print("=" * 60)
+    print("FAST POLARS ENTITY MATCHER")
+    print("=" * 60)
+
+    source1 = load_source(S1_PATH)
+
+    source2 = load_source(S2_PATH)
+    source3 = load_source(S3_PATH)
+
+    print()
+    print(
+        f"Source 1: {source1.height:,}"
+    )
+    print(
+        f"Source 2: {source2.height:,}"
+    )
+    print(
+        f"Source 3: {source3.height:,}"
+    )
+
+    print()
+    print("Combining target sources...", flush=True)
+
+    targets = pl.concat(
+        [
+            source2,
+            source3,
+        ],
+        how="vertical",
+    )
+
+    print(
+        f"Total targets: {targets.height:,}",
+        flush=True,
+    )
+
+    print()
+    print("Generating candidates...", flush=True)
+
+    candidates = build_candidates(
+        source1,
+        targets,
+    )
+
+    print()
+    print("Generating matches...", flush=True)
+
+    matches = build_matches(
+        source1,
+        targets,
+        candidates,
+    )
+
+    print()
+    print("Writing outputs...", flush=True)
+
+    write_outputs(
+        source1,
+        candidates,
+        matches,
+    )
+
+
+if __name__ == "__main__":
     main()

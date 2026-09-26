@@ -6,7 +6,12 @@ from config import (
     TRAIN_SOURCE3,
     TRAIN_GROUND_TRUTH,
 )
-from normalization import normalize_text
+
+from normalization import (
+    normalize_business_name,
+    normalize_country,
+    extract_pincode,
+)
 
 
 # --------------------------------------------------
@@ -15,63 +20,150 @@ from normalization import normalize_text
 
 def add_blocking_keys(df: pl.DataFrame) -> pl.DataFrame:
     """
-    Create the same blocking keys used by blocking.py.
+    Create exactly the same blocking keys as blocking.py.
 
-    key1 = country + first character
-    key2 = country + first 4 characters
-    key3 = country + first 3 characters
+    This is important: the evaluator and production matcher
+    must use identical blocking logic.
     """
+
+    # --------------------------------------------------
+    # Normalize name and country
+    # --------------------------------------------------
 
     df = df.with_columns(
         [
             pl.col("business_name")
             .map_elements(
-                normalize_text,
+                normalize_business_name,
                 return_dtype=pl.String,
             )
-            .fill_null(pl.lit(""))
+            .fill_null("")
             .alias("name_normalized"),
 
             pl.col("country")
             .map_elements(
-                normalize_text,
+                normalize_country,
                 return_dtype=pl.String,
             )
-            .fill_null(pl.lit(""))
+            .fill_null("")
             .alias("country_normalized"),
         ]
     )
 
+    # --------------------------------------------------
+    # Pincode
+    # --------------------------------------------------
+
+    df = df.with_columns(
+        pl.struct(["business_address", "country"])
+        .map_elements(
+            lambda row: extract_pincode(
+                row["business_address"],
+                row["country"],
+            ),
+            return_dtype=pl.String,
+        )
+        .fill_null("")
+        .alias("pincode")
+    )
+
+    # --------------------------------------------------
+    # Longest meaningful word
+    # --------------------------------------------------
+
+    def get_longest_word(name):
+        if name is None:
+            return ""
+
+        name = str(name).strip()
+
+        if not name:
+            return ""
+
+        words = [
+            word
+            for word in name.split()
+            if len(word) >= 4
+        ]
+
+        if not words:
+            return ""
+
+        return max(words, key=len)
+
+    df = df.with_columns(
+        pl.col("name_normalized")
+        .map_elements(
+            get_longest_word,
+            return_dtype=pl.String,
+        )
+        .fill_null("")
+        .alias("longest_name_word")
+    )
+
+    # --------------------------------------------------
+    # Seven blocking keys
+    # --------------------------------------------------
+
+    country = pl.col("country_normalized").fill_null("")
+    name = pl.col("name_normalized").fill_null("")
+    longest = pl.col("longest_name_word").fill_null("")
+    pincode = pl.col("pincode").fill_null("")
+
     df = df.with_columns(
         [
+            # Rule 1
             (
-                pl.col("country_normalized")
+                country
                 + pl.lit("_")
-                + pl.col("name_normalized").str.slice(0, 1)
+                + name.str.slice(0, 1)
             ).alias("key1"),
 
+            # Rule 2
             (
-                pl.col("country_normalized")
+                country
                 + pl.lit("_")
-                + pl.col("name_normalized").str.slice(0, 4)
+                + longest.str.slice(0, 4)
             ).alias("key2"),
 
+            # Rule 3
             (
-                pl.col("country_normalized")
+                country
                 + pl.lit("_")
-                + pl.col("name_normalized").str.slice(0, 3)
+                + longest.str.slice(0, 3)
             ).alias("key3"),
+
+            # Rule 4
+            (
+                country
+                + pl.lit("_")
+                + longest.str.slice(0, 2)
+            ).alias("key4"),
+
+            # Rule 5
+            (
+                country
+                + pl.lit("_")
+                + pincode
+            ).alias("key5"),
+
+            # Rule 6
+            (
+                country
+                + pl.lit("_")
+                + name.str.slice(0, 3)
+            ).alias("key6"),
+
+            # Rule 7
+            (
+                country
+                + pl.lit("_")
+                + name
+            ).alias("key7"),
         ]
     )
 
-    return df.select(
-        [
-            "entity_id",
-            "key1",
-            "key2",
-            "key3",
-        ]
-    )
+    return df
 
 
 # --------------------------------------------------
@@ -94,11 +186,8 @@ def load_ground_truth() -> pl.DataFrame:
         )
         .select(
             [
-                pl.col("source1_entity_id")
-                .cast(pl.String),
-
-                pl.col("matched_entity_ids")
-                .cast(pl.String),
+                pl.col("source1_entity_id").cast(pl.String),
+                pl.col("matched_entity_ids").cast(pl.String),
             ]
         )
         .collect()
@@ -108,7 +197,7 @@ def load_ground_truth() -> pl.DataFrame:
         ground_truth
         .with_columns(
             pl.col("matched_entity_ids")
-            .fill_null(pl.lit(""))
+            .fill_null("")
             .str.split(by=",")
             .alias("target_id")
         )
@@ -122,12 +211,12 @@ def load_ground_truth() -> pl.DataFrame:
         )
         .filter(
             pl.col("target_id").is_not_null()
-            & (pl.col("target_id") != pl.lit(""))
+            & (pl.col("target_id") != "")
         )
         .select(
             [
                 "source1_entity_id",
-                pl.col("target_id").alias("target_id"),
+                "target_id",
             ]
         )
     )
@@ -144,9 +233,7 @@ def load_relevant_source(
     required_ids: set[str],
 ) -> pl.DataFrame:
     """
-    Read only the records whose entity IDs are required.
-
-    Uses Polars lazy scanning and filtering.
+    Read only records whose entity IDs are required.
     """
 
     ids_df = pl.DataFrame(
@@ -165,6 +252,7 @@ def load_relevant_source(
             [
                 "entity_id",
                 "business_name",
+                "business_address",
                 "country",
             ]
         )
@@ -273,25 +361,56 @@ def main():
     # Combine target blocking keys
     # --------------------------------------------------
 
+    target_columns = [
+        "entity_id",
+        "key1",
+        "key2",
+        "key3",
+        "key4",
+        "key5",
+        "key6",
+        "key7",
+    ]
+
     targets = pl.concat(
         [
-            source2.select(
-                [
-                    "entity_id",
-                    "key1",
-                    "key2",
-                     "key3",
-                ]
-            ),
-            source3.select(
-                [
-                    "entity_id",
-                    "key1",
-                    "key2",
-                    "key3",
-                ]
-            ),
+            source2.select(target_columns),
+            source3.select(target_columns),
         ]
+    )
+
+    # --------------------------------------------------
+    # Attach Source 1 blocking keys
+    # --------------------------------------------------
+
+    source1_keys = source1.rename(
+        {
+            "entity_id": "source1_entity_id",
+            "key1": "source1_key1",
+            "key2": "source1_key2",
+            "key3": "source1_key3",
+            "key4": "source1_key4",
+            "key5": "source1_key5",
+            "key6": "source1_key6",
+            "key7": "source1_key7",
+        }
+    )
+
+    # --------------------------------------------------
+    # Attach target blocking keys
+    # --------------------------------------------------
+
+    target_keys = targets.rename(
+        {
+            "entity_id": "target_id",
+            "key1": "target_key1",
+            "key2": "target_key2",
+            "key3": "target_key3",
+            "key4": "target_key4",
+            "key5": "target_key5",
+            "key6": "target_key6",
+            "key7": "target_key7",
+        }
     )
 
     # --------------------------------------------------
@@ -300,56 +419,81 @@ def main():
 
     evaluated = (
         matches
-
-        # Attach Source 1 blocking keys
         .join(
-            source1.rename(
-                {
-                    "entity_id": "source1_entity_id",
-                    "key1": "source1_key1",
-                    "key2": "source1_key2",
-                    "key3": "source1_key3",
-                }
-            ),
+            source1_keys,
             on="source1_entity_id",
             how="left",
         )
-
-        # Attach target blocking keys
         .join(
-            targets.rename(
-                {
-                    "entity_id": "target_id",
-                    "key1": "target_key1",
-                    "key2": "target_key2",
-                    "key3": "target_key3",
-                }
-            ),
+            target_keys,
             on="target_id",
             how="left",
         )
-
-        # Match survives if ANY blocking key matches.
         .with_columns(
-           (
-    (
-        (pl.col("source1_key1") != pl.lit(""))
-        & (pl.col("target_key1") != pl.lit(""))
-        & (pl.col("source1_key1") == pl.col("target_key1"))
-    )
-    |
-    (
-        (pl.col("source1_key2") != pl.lit(""))
-        & (pl.col("target_key2") != pl.lit(""))
-        & (pl.col("source1_key2") == pl.col("target_key2"))
-    )
-    |
-    (
-        (pl.col("source1_key3") != pl.lit(""))
-        & (pl.col("target_key3") != pl.lit(""))
-        & (pl.col("source1_key3") == pl.col("target_key3"))
-    )
-).alias("retained")
+            (
+                (
+                    (pl.col("source1_key1") != "")
+                    & (pl.col("target_key1") != "")
+                    & (
+                        pl.col("source1_key1")
+                        == pl.col("target_key1")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key2") != "")
+                    & (pl.col("target_key2") != "")
+                    & (
+                        pl.col("source1_key2")
+                        == pl.col("target_key2")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key3") != "")
+                    & (pl.col("target_key3") != "")
+                    & (
+                        pl.col("source1_key3")
+                        == pl.col("target_key3")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key4") != "")
+                    & (pl.col("target_key4") != "")
+                    & (
+                        pl.col("source1_key4")
+                        == pl.col("target_key4")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key5") != "")
+                    & (pl.col("target_key5") != "")
+                    & (
+                        pl.col("source1_key5")
+                        == pl.col("target_key5")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key6") != "")
+                    & (pl.col("target_key6") != "")
+                    & (
+                        pl.col("source1_key6")
+                        == pl.col("target_key6")
+                    )
+                )
+                |
+                (
+                    (pl.col("source1_key7") != "")
+                    & (pl.col("target_key7") != "")
+                    & (
+                        pl.col("source1_key7")
+                        == pl.col("target_key7")
+                    )
+                )
+            ).alias("retained")
         )
     )
 
@@ -380,9 +524,9 @@ def main():
         * 100
     )
 
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("BLOCKING EVALUATION")
-    print("=" * 50)
+    print("=" * 60)
 
     print(
         f"Total true matches:       "
@@ -404,7 +548,7 @@ def main():
         f"{recall:.2f}%"
     )
 
-    print("=" * 50)
+    print("=" * 60)
 
 
 if __name__ == "__main__":
