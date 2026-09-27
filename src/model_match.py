@@ -46,10 +46,6 @@ MODEL_FEATURES = [
     "candidate_country_missing",
     "country_both_present",
 
-    "postal_code_match",
-    "phone_match",
-    "email_match",
-    "website_match",
 ]
 
 

@@ -17,6 +17,42 @@ from rapidfuzz.distance import JaroWinkler
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INPUT_PATH = PROJECT_ROOT / "data" / "training_pairs.tsv"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "training_features.tsv"
+MODEL_FEATURES = [
+    "name_exact",
+    "name_compact_exact",
+    "name_similarity",
+    "name_ratio",
+    "name_token_sort_similarity",
+    "name_token_similarity",
+    "name_token_set_similarity",
+    "name_token_overlap",
+    "name_jaro_winkler",
+    "name_ngram_similarity",
+    "name_weighted_similarity",
+    "name_length_ratio",
+
+    "address_exact",
+    "address_compact_exact",
+    "address_similarity",
+    "address_ratio",
+    "address_token_sort_similarity",
+    "address_token_similarity",
+    "address_token_set_similarity",
+    "address_token_overlap",
+    "address_jaro_winkler",
+    "address_ngram_similarity",
+    "address_weighted_similarity",
+    "address_length_ratio",
+
+    "house_number_match",
+    "house_number_exact_match",
+
+    "country_match",
+    "source_country_missing",
+    "candidate_country_missing",
+    "country_both_present",
+
+]
 
 
 # =========================================================
