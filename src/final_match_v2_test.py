@@ -35,7 +35,7 @@ THREADS = 4
 # Keep the candidate pool bounded.
 BLOCK_CAP = 20
 
-MATCH_THRESHOLD = 0.999
+MATCH_THRESHOLD = 0.692
 MAX_MATCHES_PER_SOURCE = 3
 
 # Larger batch = fewer DuckDB/Pandas registrations.
@@ -70,6 +70,7 @@ FEATURES = [
     "address_ngram_similarity",
     "address_weighted_similarity",
     "address_length_ratio",
+
     "house_number_match",
     "house_number_exact_match",
 
@@ -77,11 +78,6 @@ FEATURES = [
     "source_country_missing",
     "candidate_country_missing",
     "country_both_present",
-
-    "postal_code_match",
-    "phone_match",
-    "email_match",
-    "website_match",
 ]
 
 
